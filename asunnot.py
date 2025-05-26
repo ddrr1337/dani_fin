@@ -1,14 +1,12 @@
 import os
 import requests
-
-from folium import Marker, Map, Circle, Popup
-from folium.plugins import BeautifyIcon
-
+from datetime import datetime
 import pandas as pd
+import time
 
-import xlwings as xw
 
-LOCATIONS = '[[14694,5,"00100, Helsinki"],\
+
+""" LOCATIONS = '[[14694,5,"00100, Helsinki"],\
             [14695,5,"00120, Helsinki"],\
             [14696,5,"00130, Helsinki"],\
             [14697,5,"00140, Helsinki"],\
@@ -25,22 +23,23 @@ LOCATIONS = '[[14694,5,"00100, Helsinki"],\
             [14728,5,"00530, Helsinki"],\
             [5079937,5,"00540, Helsinki"],\
             [14729,5,"00550, Helsinki"],\
-            [14732,5,"00580, Helsinki"]]'
-            
+            [14732,5,"00580, Helsinki"]]' """
+
+
+LOCATIONS = '[[64,6,"Helsinki"]]'
+
+PARAMS = {'cardType':100,# cardType 101 for rentals, 100 for sale
+          'limit':5000,
+          'locations':LOCATIONS,
+          'offset':0,
+          'roomCount[]':[3,4],
+          'habitationType[]':[1],
+          'sortBy':"published_sort_desc"}
+
 URL = "https://asunnot.oikotie.fi/vuokra-asunnot"
 API_URL = "https://asunnot.oikotie.fi/api/cards"
 
-PARAMS = {'cardType':101,
-          'limit':1000, # cardType 101 for rentals, 100 for sale
-          'locations':LOCATIONS,
-          'offset':0, 
-          'constructionYear[max]':2023,
-          'roomCount[]':[2,3,4],
-          'price[min]':800, 
-          'price[max]':1500, 
-          'size[min]':55, 
-          'size[max]':250, 
-          'sortBy':"published_sort_desc"} 
+
 
 def get_headers():
     r = requests.get(url=URL)
@@ -53,6 +52,7 @@ def get_headers():
             cuid = r[27:-2]
     headers = {"OTA-cuid":cuid, "OTA-loaded":loaded, "OTA-token":token}
     return headers
+
 
 def request_data(headers):
     r = requests.get(url=API_URL, params=PARAMS, headers=headers)
@@ -79,24 +79,13 @@ def create_datalist(data):
         datalist.append(row)
     return datalist
 
-def create_dataframe(datalist):        
+def create_dataframe(datalist):
     df = pd.DataFrame(datalist, columns = ['url', 'rooms', 'roomConfiguration', 'price', 'published', 'size', 'address', 'district', 'city', 'buildYear', 'latitude', 'longitude'])
+    df['objects_count'] = len(df)  # Nueva columna añadida aquí
     return df
 
-def create_generated_files_directory():
-    if not os.path.exists('generated_files/'):
-        os.makedirs('generated_files/')
-        
-def create_CSV_sheet(df):
 
-    wb = xw.Book('templates/asunnot_template.xlsx')
-    sheet = wb.sheets['CSV']
 
-    sheet.clear_contents()
-    sheet['A1'].options(index=False, header=False).value = df
-
-    wb.save('generated_files/asunnot.xlsx')
-    wb.close()
 
 def calculate_persqm(df):
     df['price'] = df['price'].replace(to_replace = "[^0-9]", value = "", regex = True)
@@ -107,106 +96,79 @@ def calculate_persqm(df):
 def calculate_quintile(df):
     df['quintile'] = pd.qcut(df['perSquareMetre'], 5, labels=False)
     return df
-    
+
 def calculate_mean_rent(df):
     mean_rent = df['price'].mean() # For later implementations
     return mean_rent
 
-def create_base_map():
-    base_map = Map([60.1718, 24.933], zoom_start=14)
-    return base_map
-
-def public_transport_map(base_map):
-    stations_df = pd.read_csv("templates/hsl_stops.csv")
+def save_to_csv(obects_count,mean_price, min_price, max_price, daily_variation=None, annualized_variation=None):
+    current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    filename_csv = "historical_data.csv"
     
-    metro_stations = stations_df.loc[stations_df['VERKKO'] == 2]
-    tram_stations = stations_df.loc[stations_df['VERKKO'] == 3]
-    train_stations = stations_df.loc[stations_df['VERKKO'] == 4]
 
-    for i, v in metro_stations.iterrows():
-        Circle(location=[v['Y-koord.'], v['X-koord.']],
-                        radius=15,
-                        color='#FF6633',
-                        fill_color='#FF6633',
-                        fill=True).add_to(base_map)
     
-    for i, v in tram_stations.iterrows():
-        Circle(location=[v['Y-koord.'], v['X-koord.']],
-                            radius=7,
-                            color='#009966',
-                            fill_color='#009966',
-                            fill=True).add_to(base_map)
-        
-    for i, v in train_stations.iterrows():
-        Circle(location=[v['Y-koord.'], v['X-koord.']],
-                            radius=15,
-                            color='#993399',
-                            fill_color='#993399',
-                            fill=True).add_to(base_map)
-        
-    return base_map
+    # Actualizar CSV
+    new_data = pd.DataFrame([[current_date,obects_count, mean_price, min_price, max_price, daily_variation, annualized_variation]],
+                          columns=['Fecha','Objects', 'Promedio', 'Mínimo', 'Máximo', 'Variación Diaria (%)', 'Variación Anualizada (%)'])
     
-def apartments_to_map(df, apartment_map):
-    for i in range(len(df)):
-        coords = [df.iloc[i]['latitude'], df.iloc[i]['longitude']]
-        nametag = df.iloc[i]['address']
-        nametag_url = df.iloc[i]['url']
-        nametag_price = df.iloc[i]['price']
-        nametag_size = df.iloc[i]['size']
-        
-        match df.iloc[i]['quintile']:
-            case 0:
-                colour = '#00A6A8'
-            case 1:
-                colour = '#0092BA'
-            case 2:
-                colour = '#007DBC'
-            case 3:
-                colour = '#0065AE'
-            case 4:
-                colour = '#4A4B92'
-            case _:
-                colour = 'black'
-        
-        popup = Popup(max_width=800, 
-                      html=(
-                            '<a href={}>{}</a><br>'
-                            '{} €/kk<br>'
-                            '{} m^2'
-                            ).format(
-                                nametag_url, 
-                                nametag, 
-                                nametag_price, 
-                                nametag_size)
-                      )
-        
-        Marker(location=coords, 
-               popup = popup,
-                    
-               icon=BeautifyIcon(prefix='fa',
-                                icon='house', 
-                                icon_shape='circle',
-                                border_width=0,
-                                background_color='transparent',
-                                text_color=colour,
-                                inner_icon_style="font-size:20px")
-                ).add_to(apartment_map)
+    if os.path.exists(filename_csv):
+        new_data.to_csv(filename_csv, mode='a', header=False, index=False)
+    else:
+        new_data.to_csv(filename_csv, mode='w', index=False)
 
-    return apartment_map
-
-def save_map(map):
-    map.save('generated_files/asunnot.html')
-    
+# Bloque principal modificado
 headers = get_headers()
 data = request_data(headers)
 datalist = create_datalist(data)
 df = create_dataframe(datalist)
-create_generated_files_directory()
-create_CSV_sheet(df)
-df = calculate_persqm(df)
-df = calculate_quintile(df)
-mean_rent = calculate_mean_rent(df)
-base_map = create_base_map()
-transport_map = public_transport_map(base_map)
-apartment_map = apartments_to_map(df, transport_map)
-save_map(apartment_map)
+
+df['price_clean'] = df['price'].str.replace(r'[^\d]', '', regex=True).astype(float)
+
+# Calcular valores
+mean_price = round(df['price_clean'].mean(), 2)
+min_price = round(df['price_clean'].min(), 2)
+max_price = round(df['price_clean'].max(), 2)
+
+# Calcular variaciones
+daily_variation = None
+annualized_variation = None
+try:
+    historical = pd.read_csv("historical_data.csv", parse_dates=['Fecha'])
+    if not historical.empty:
+        last_record = historical.iloc[-1]
+        last_mean = last_record['Promedio']
+        last_date = last_record['Fecha']
+        
+        # Calcular días entre registros
+        current_date = datetime.now()
+        days_diff = (current_date - last_date).days
+        days_diff = max(days_diff, 1)  # Evitar división por cero
+        
+        # Variación diaria
+        daily_variation = round(((mean_price - last_mean) / last_mean * 100), 2)
+        
+        # Variación anualizada precisa
+        if last_mean != 0:
+            growth_factor = mean_price / last_mean
+            annualized_variation = round((growth_factor ** (365 / days_diff) - 1) * 100, 2) 
+
+except (FileNotFoundError, KeyError, IndexError) as e:
+    pass
+
+# Resultados en consola
+while True:
+    time.sleep(3600*24)
+    print("\n" + "="*50)
+    print(f"Análisis diario - {datetime.now().strftime('%d/%m/%Y')}")
+    print("="*50)
+    print(f"• Precio promedio actual: €{mean_price:.2f}")
+    print(f"• Rango de precios: €{min_price:.2f} - €{max_price:.2f}")
+    if daily_variation is not None:
+        print(f"\n● Variación desde último registro: {daily_variation:+.2f}%")
+        print(f"● Tasa anualizada equivalente: {annualized_variation:+.2f}%")
+    else:
+        print("\n⚠️ Primera ejecución - Sin datos históricos para comparar")
+    print("="*50 + "\n")
+
+    # Guardar en archivo
+    save_to_csv(len(df),mean_price, min_price, max_price, daily_variation, annualized_variation)
